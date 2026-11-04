@@ -57,13 +57,14 @@ def modal_synth(
 
     a = rearrange(a, "b m n -> (b m) n")
     w = rearrange(w, "b m n -> (b m) n")
-    phase_env = torch.cumsum(w, dim=1)
+    phase_env = torch.cumsum(w, dim=1, dtype=torch.float64)
     if phase is not None:
         phase = rearrange(phase, "b m n -> (b m) n")
         phase_env = phase_env + phase[..., 0, None]
 
     # Generate the modal signal
-    y = a * torch.sin(phase_env)
+    carrier = torch.sin(torch.remainder(phase_env, 2 * torch.pi)).to(w.dtype)
+    y = a * carrier
     y = rearrange(y, "(b m) n -> b m n", b=batch_size, m=num_modes)
 
     # Sum the modes

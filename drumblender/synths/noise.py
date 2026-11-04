@@ -49,10 +49,8 @@ class NoiseGenerator(nn.Module):
             Sequence of IR filters of size target_size.
                 Shape: [nb, frame_len, target_size]
         """
-        # Cast tensor as if it was complex adding a zeroed imaginary part
-        # with torch stack.
-        amp = torch.stack([amp, torch.zeros_like(amp)], -1)
-        amp = torch.view_as_complex(amp)
+        # Construct complex values without depending on real tensor strides.
+        amp = torch.complex(amp, torch.zeros_like(amp))
 
         # Compute the impulse response of the filters.
         # This gives a zero-centered response.

@@ -1,3 +1,5 @@
+> For the adapted 48 kHz full-clip experiment, use [the baseline protocol](docs/baseline_protocol.md) and `cfg/05_all_parallel_variable.yaml`. The numbered original configs below retain the upstream protocol.
+
 <div align="center">
 
 # Differentiable Modelling of Percussive Audio with Transient and Spectral Synthesis

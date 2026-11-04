@@ -262,9 +262,15 @@ class SaveConfigCallbackWanb(SaveConfigCallback):
     def setup(
         self, trainer: pl.Trainer, pl_module: pl.LightningModule, stage: str
     ) -> None:
+        if getattr(self, "already_saved", False):
+            return
         super().setup(trainer, pl_module, stage)
         if isinstance(trainer.logger, WandbLogger):
-            config = Path(trainer.log_dir).joinpath("config.yaml")
+            # All ranks must participate in Lightning's log-directory broadcast.
+            log_dir = trainer.log_dir
+            if not getattr(trainer, "is_global_zero", True):
+                return
+            config = Path(log_dir).joinpath("config.yaml")
             assert config.exists()
             experiment_dir = Path(trainer.logger.experiment.dir)
 

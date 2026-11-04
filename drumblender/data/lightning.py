@@ -13,7 +13,7 @@ import torch
 import torchaudio
 from einops import rearrange
 from torch.utils.data import DataLoader
-from torchaudio.datasets.utils import extract_archive
+from shutil import unpack_archive as extract_archive
 from tqdm import tqdm
 
 import drumblender.utils.audio as audio_utils
