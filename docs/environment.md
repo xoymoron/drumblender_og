@@ -33,7 +33,7 @@ The server driver must support CUDA 12.6. The training configuration uses
 standard DDP with two devices. Each rank gets a sharded sampler, and Lightning
 must not replace it (replace_sampler_ddp=false). Validation losses synchronize
 across ranks before scheduler/checkpoint/early-stopping decisions.
-Per-GPU batch 4 x 2 devices x accumulation 8 preserves effective batch 64.
+Per-GPU batch 2 x 2 devices x accumulation 8 gives nominal effective batch 32.
 The last partial batch uses standard Lightning accumulation.
 For a local CLI smoke test, explicitly override trainer.accelerator=cpu,
 trainer.devices=1, and trainer.strategy=auto.
@@ -43,4 +43,4 @@ It uses small models and short synthetic inputs. It does not establish CUDA/NCCL
 compatibility or peak GPU memory. DDP does not pool GPU memory: each 24 GiB card
 holds a model replica. Peak memory for full 20-second training on these cards
 must still be measured on the server. If necessary, per-GPU batch 1 with
-accumulation 32 preserves the same nominal effective batch of 64.
+accumulation 16 preserves the same nominal effective batch of 32.

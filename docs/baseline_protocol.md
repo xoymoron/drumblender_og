@@ -14,8 +14,8 @@ The settings were taken from the reference project's `cfg/05_all_parallel.yaml` 
 | Scheduler | ReduceLROnPlateau, `validation/loss`, factor 0.5, patience 10, minimum LR 0.00000625 |
 | Early stopping | `validation/loss`, patience 20, finite check, epoch-end check |
 | Maximum epochs | 150 |
-| Training batch / accumulation | 8 / 8, standard Lightning automatic optimization |
-| Device count | 1 |
+| Training batch / accumulation | 2 per GPU / 8, standard Lightning automatic optimization |
+| Device count | 2 (DDP) |
 | Seed | 20261106 |
 | Workers | 12 |
 | Bucketing | Same quantile-bucket sampler as the reference project; 8 buckets, retain incomplete batches, shuffle each epoch |
@@ -24,7 +24,7 @@ The settings were taken from the reference project's `cfg/05_all_parallel.yaml` 
 | Modal extraction | Original CQT/SMS approach with demonstrated indexing fixes; 64 modes, hop 256, fmin 20, 240 bins, 24 bins/octave, threshold -80 dB, matching threshold 5 percent, minimum 10 observed frames |
 | Checkpoints | Monitor validation loss, keep best 5 and last |
 
-Eight times eight is a nominal effective batch of 64. Incomplete bucket batches and the final accumulation group follow normal Lightning behavior, exactly as requested. No custom gradient rescaling, oversampling, adaptive sample budgets, or per-item validation RNG is added. Noise synthesis remains stochastic, as in the reference training path.
+Two samples per GPU times two GPUs times eight accumulation steps is a nominal effective batch of 32. Incomplete bucket batches and the final accumulation group follow normal Lightning behavior, exactly as requested. No custom gradient rescaling, oversampling, adaptive sample budgets, or per-item validation RNG is added. Noise synthesis remains stochastic, as in the reference training path.
 
 ## Data and split contract
 

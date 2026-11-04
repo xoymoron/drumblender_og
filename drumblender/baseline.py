@@ -66,6 +66,11 @@ class VariableLengthDrumBlender(DrumBlender):
     variable-length policy. Encoders and FiLM never observe collate padding.
     """
 
+    def transfer_batch_to_device(self, batch, device, dataloader_idx):
+        audio, params, lengths, frame_lengths = batch
+        return (audio.to(device, non_blocking=True),
+                params.to(device, non_blocking=True), lengths, frame_lengths)
+
     def forward(self, original, params, lengths=None, frame_lengths=None):
         if original.ndim != 3 or original.shape[1] != 1 or min(original.shape) < 1:
             raise ValueError("Expected nonempty mono audio [B,1,T]")

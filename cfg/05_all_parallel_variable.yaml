@@ -33,7 +33,7 @@ data:
     audio_dir: null
     sample_rate: 48000
     expected_num_modes: 64
-    batch_size: 4
+    batch_size: 2
     num_workers: 12
     seed: 20261106
     use_bucketing: true

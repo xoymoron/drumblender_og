@@ -313,7 +313,7 @@ def test_baseline_config_matches_reference_training_protocol():
     assert config["trainer"]["max_epochs"] == 150
     early = config["trainer"]["callbacks"][0]["init_args"]
     assert early["patience"] == 20 and early["check_on_train_epoch_end"]
-    assert config["data"]["init_args"]["batch_size"] == 4
+    assert config["data"]["init_args"]["batch_size"] == 2
     assert config["data"]["init_args"]["seed"] == 20261106
 
 

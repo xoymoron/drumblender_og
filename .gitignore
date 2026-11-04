@@ -245,3 +245,6 @@ test_audio/
 
 #VSCode Workspace
 *.code-workspace
+
+# Local training checkpoints
+ckpt/
