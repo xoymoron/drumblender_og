@@ -3,8 +3,10 @@
 import argparse
 import hashlib
 import json
+import multiprocessing as mp
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import torch
@@ -47,6 +49,86 @@ def reference_splits(metadata_file, seed=20261106, train_ratio=0.8, val_ratio=0.
     return membership
 
 
+_ANALYZER = None
+_DEVICE = "cpu"
+_OPTIONS = {}
+
+
+def _initialize_worker(options, devices, threads):
+    global _ANALYZER, _DEVICE, _OPTIONS
+    _OPTIONS = options
+    _DEVICE = devices.get() if devices is not None else options["device"]
+    torch.set_num_threads(threads)
+    if _DEVICE.startswith("cuda"):
+        torch.cuda.set_device(_DEVICE)
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+    _ANALYZER = BaselineModalAnalysis(**options["analysis"], verbose=False)
+    _ANALYZER.cqt.to(_DEVICE)
+
+
+def _extract_file(path):
+    analyzer = _ANALYZER
+    root, out = Path(_OPTIONS["root"]), Path(_OPTIONS["out"])
+    sample_rate, num_modes = _OPTIONS["sample_rate"], _OPTIONS["num_modes"]
+    manifest, pack_by_path = _OPTIONS["manifest"], _OPTIONS["pack_by_path"]
+    path = Path(path)
+    item_started = time.perf_counter()
+    waveform, rate = torchaudio.load(str(path))
+    if (
+        rate != sample_rate
+        or waveform.shape[0] != 1
+        or waveform.shape[-1] < 1
+        or not torch.isfinite(waveform).all()
+    ):
+        raise ValueError(f"Expected preprocessed finite mono {sample_rate} Hz: {path}")
+    relative = path.relative_to(root).as_posix()
+    with torch.no_grad():
+        try:
+            frequency, amplitude, phase = analyzer(waveform.to(_DEVICE))
+        except RuntimeError as exc:
+            if "padding" not in str(exc).lower():
+                raise
+            previous = analyzer.cqt.pad_mode
+            try:
+                analyzer.cqt.pad_mode = "constant"
+                frequency, amplitude, phase = analyzer(waveform.to(_DEVICE))
+            finally:
+                analyzer.cqt.pad_mode = previous
+    track_count = int(frequency.shape[1])
+    active_track_count = int(torch.count_nonzero(amplitude[0].abs().sum(dim=-1)))
+    parameters = torch.stack(
+        [frequency[0] * (2 * torch.pi / sample_rate), amplitude[0], phase[0]]
+    )
+    parameters = F.pad(parameters, (0, 0, 0, num_modes - parameters.shape[1]))
+    feature = Path("features") / Path(relative).with_suffix(".pt")
+    (out / feature).parent.mkdir(parents=True, exist_ok=True)
+    torch.save(parameters, out / feature)
+    item_seconds = time.perf_counter() - item_started
+    item_stats = {
+        "path": relative,
+        "seconds": item_seconds,
+        "samples": int(waveform.shape[-1]),
+        "tracks": track_count,
+        "active_tracks": active_track_count,
+    }
+    row = {
+        "num_tracks": track_count,
+        "num_active_tracks": active_track_count,
+        "extraction_seconds": item_seconds,
+        "filename": str(path),
+        "orig_relpath": relative,
+        "feature_file": feature.as_posix(),
+        "num_samples": waveform.shape[-1],
+        "sample_pack_key": pack_by_path.get(relative, "__root__"),
+        "split": manifest[relative],
+        "audio_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
+    return relative, row, item_stats
+
+
 def extract(
     processed_root,
     out_dir,
@@ -64,6 +146,9 @@ def extract(
     reference_metadata=None,
     train_ratio=0.8,
     val_ratio=0.1,
+    workers=1,
+    devices=None,
+    threads_per_worker=1,
 ):
     root, out = Path(processed_root).resolve(), Path(out_dir).resolve()
     if out.exists():
@@ -99,70 +184,86 @@ def extract(
         row["orig_relpath"].replace("\\", "/"): row.get("sample_pack_key") or "__root__"
         for row in reference_rows.values()
     }
-    analyzer = BaselineModalAnalysis(
-        sample_rate,
-        hop_length=hop_length,
-        fmin=fmin,
-        n_bins=n_bins,
-        bins_per_octave=bins_per_octave,
-        min_length=min_length,
+    devices = list(devices or ["cpu"])
+    if workers < 1 or threads_per_worker < 1 or workers < len(devices):
+        raise ValueError(
+            "Need positive workers/threads and at least one worker per device"
+        )
+    for device in devices:
+        parsed = torch.device(device)
+        if parsed.type not in ("cpu", "cuda"):
+            raise ValueError("Only CPU and CUDA extraction are supported")
+        if parsed.type == "cuda" and (
+            parsed.index is None
+            or not torch.cuda.is_available()
+            or parsed.index >= torch.cuda.device_count()
+        ):
+            raise ValueError(f"CUDA device is unavailable: {device}")
+    features = [p.relative_to(root).with_suffix(".pt").as_posix() for p in wavs]
+    if len(features) != len(set(features)):
+        raise ValueError(
+            "Input filenames collide after replacing their extension with .pt"
+        )
+    options = dict(
+        root=str(root),
+        out=str(out),
+        sample_rate=sample_rate,
         num_modes=num_modes,
-        threshold=threshold,
-        diff_threshold=diff_threshold,
-        verbose=False,
+        manifest=manifest,
+        pack_by_path=pack_by_path,
+        device=devices[0],
+        analysis=dict(
+            sample_rate=sample_rate,
+            hop_length=hop_length,
+            fmin=fmin,
+            n_bins=n_bins,
+            bins_per_octave=bins_per_octave,
+            min_length=min_length,
+            num_modes=num_modes,
+            threshold=threshold,
+            diff_threshold=diff_threshold,
+        ),
     )
-    metadata = {}
-    stats = []
+    metadata, stats = {}, []
     out.mkdir(parents=True)
     started = time.perf_counter()
-    for path in tqdm(wavs, desc="Modal extraction", unit="file"):
-        item_started = time.perf_counter()
-        waveform, rate = torchaudio.load(str(path))
-        if (
-            rate != sample_rate
-            or waveform.shape[0] != 1
-            or waveform.shape[-1] < 1
-            or not torch.isfinite(waveform).all()
-        ):
-            raise ValueError(
-                f"Expected preprocessed finite mono {sample_rate} Hz: {path}"
-            )
-        relative = path.relative_to(root).as_posix()
-        with torch.no_grad():
+    # Long files first reduce the final straggler without changing any analysis.
+    jobs = sorted(wavs, key=lambda p: (-p.stat().st_size, p.as_posix()))
+    previous_threads = torch.get_num_threads()
+    try:
+        if workers == 1:
+            _initialize_worker(options, None, threads_per_worker)
+            results = map(_extract_file, jobs)
+            for relative, row, item_stats in tqdm(
+                results, total=len(jobs), desc="Modal extraction", unit="file"
+            ):
+                metadata[relative] = row
+                stats.append(item_stats)
+        else:
+            context = mp.get_context("spawn")
+            device_queue = context.Queue()
+            for index in range(workers):
+                device_queue.put(devices[index % len(devices)])
             try:
-                frequency, amplitude, phase = analyzer(waveform)
-            except RuntimeError as exc:
-                if "padding" not in str(exc).lower():
-                    raise
-                previous = analyzer.cqt.pad_mode
-                try:
-                    analyzer.cqt.pad_mode = "constant"
-                    frequency, amplitude, phase = analyzer(waveform)
-                finally:
-                    analyzer.cqt.pad_mode = previous
-        track_count = int(frequency.shape[1])
-        active_track_count = int(torch.count_nonzero(amplitude[0].abs().sum(dim=-1)))
-        parameters = torch.stack(
-            [frequency[0] * (2 * torch.pi / sample_rate), amplitude[0], phase[0]]
-        )
-        parameters = F.pad(parameters, (0, 0, 0, num_modes - parameters.shape[1]))
-        feature = Path("features") / Path(relative).with_suffix(".pt")
-        (out / feature).parent.mkdir(parents=True, exist_ok=True)
-        torch.save(parameters, out / feature)
-        item_seconds = time.perf_counter() - item_started
-        stats.append({"path": relative, "seconds": item_seconds, "samples": int(waveform.shape[-1]), "tracks": track_count, "active_tracks": active_track_count})
-        metadata[relative] = {
-            "num_tracks": track_count,
-            "num_active_tracks": active_track_count,
-            "extraction_seconds": item_seconds,
-            "filename": str(path),
-            "orig_relpath": relative,
-            "feature_file": feature.as_posix(),
-            "num_samples": waveform.shape[-1],
-            "sample_pack_key": pack_by_path.get(relative, "__root__"),
-            "split": manifest[relative],
-            "audio_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-        }
+                with ProcessPoolExecutor(
+                    max_workers=workers,
+                    mp_context=context,
+                    initializer=_initialize_worker,
+                    initargs=(options, device_queue, threads_per_worker),
+                ) as pool:
+                    results = pool.map(_extract_file, jobs, chunksize=1)
+                    for relative, row, item_stats in tqdm(
+                        results, total=len(jobs), desc="Modal extraction", unit="file"
+                    ):
+                        metadata[relative] = row
+                        stats.append(item_stats)
+            finally:
+                device_queue.close()
+                device_queue.join_thread()
+    finally:
+        torch.set_num_threads(previous_threads)
+    metadata = dict(sorted(metadata.items()))
+    stats.sort(key=lambda row: row["path"])
     config = dict(
         sample_rate=sample_rate,
         num_modes=num_modes,
@@ -179,9 +280,22 @@ def extract(
         frequency_units="radians/sample",
         processed_root=str(root),
         waveform_processing="none",
+        execution=dict(
+            devices=devices,
+            workers=workers,
+            threads_per_worker=threads_per_worker,
+            precision="float32; TF32 disabled on CUDA",
+        ),
     )
     total_seconds = time.perf_counter() - started
-    summary = {"files": len(stats), "total_seconds": total_seconds, "mean_seconds_per_file": total_seconds / len(stats), "total_tracks": sum(row["tracks"] for row in stats), "total_active_tracks": sum(row["active_tracks"] for row in stats), "items": stats}
+    summary = {
+        "files": len(stats),
+        "total_seconds": total_seconds,
+        "mean_seconds_per_file": total_seconds / len(stats),
+        "total_tracks": sum(row["tracks"] for row in stats),
+        "total_active_tracks": sum(row["active_tracks"] for row in stats),
+        "items": stats,
+    }
     for name, content in [
         ("extraction_stats.json", summary),
         ("metadata.json", metadata),
@@ -189,11 +303,16 @@ def extract(
         ("split_manifest.json", manifest),
     ]:
         (out / name).write_text(json.dumps(content, indent=2), encoding="utf-8")
-    print(f"Extracted {len(metadata)} waveforms in {total_seconds:.1f}s; {summary['total_tracks']} tracks ({summary['total_active_tracks']} active) -> {out}")
+    print(
+        f"Extracted {len(metadata)} waveforms in {total_seconds:.1f}s; {summary['total_tracks']} tracks ({summary['total_active_tracks']} active) -> {out}"
+    )
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--devices", nargs="+", default=["cpu"])
+    parser.add_argument("--threads-per-worker", type=int, default=1)
     parser.add_argument("--processed-root", required=True)
     parser.add_argument("--out-dir", required=True)
     splits = parser.add_mutually_exclusive_group(required=True)
