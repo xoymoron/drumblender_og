@@ -17,6 +17,7 @@ from tqdm import tqdm
 # Direct script execution uses this checkout, even if another fork is installed.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from drumblender.baseline_analysis import BaselineModalAnalysis
+from drumblender.utils.modal_analysis import CQTModalAnalysis
 
 
 def reference_splits(metadata_file, seed=20261106, train_ratio=0.8, val_ratio=0.1):
@@ -65,7 +66,12 @@ def _initialize_worker(options, devices, threads):
         torch.backends.cudnn.allow_tf32 = False
         torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
-    _ANALYZER = BaselineModalAnalysis(**options["analysis"], verbose=False)
+    analyzer_class = (
+        CQTModalAnalysis
+        if options["analysis_method"] == "original"
+        else BaselineModalAnalysis
+    )
+    _ANALYZER = analyzer_class(**options["analysis"], verbose=False)
     _ANALYZER.cqt.to(_DEVICE)
 
 
@@ -149,7 +155,10 @@ def extract(
     workers=1,
     devices=None,
     threads_per_worker=1,
+    analysis_method="corrected",
 ):
+    if analysis_method not in ("original", "corrected"):
+        raise ValueError("Expected original or corrected analysis method")
     root, out = Path(processed_root).resolve(), Path(out_dir).resolve()
     if out.exists():
         raise FileExistsError(f"Refusing to overwrite cache: {out}")
@@ -212,6 +221,7 @@ def extract(
         manifest=manifest,
         pack_by_path=pack_by_path,
         device=devices[0],
+        analysis_method=analysis_method,
         analysis=dict(
             sample_rate=sample_rate,
             hop_length=hop_length,
@@ -276,7 +286,7 @@ def extract(
         threshold=threshold,
         diff_threshold=diff_threshold,
         pad_mode="reflect; constant for short inputs",
-        analyzer="corrected_upstream_cqt",
+        analyzer=f"{analysis_method}_upstream_cqt",
         frequency_units="radians/sample",
         processed_root=str(root),
         waveform_processing="none",
@@ -310,6 +320,9 @@ def extract(
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--analysis-method", choices=("original", "corrected"), default="corrected"
+    )
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--devices", nargs="+", default=["cpu"])
     parser.add_argument("--threads-per-worker", type=int, default=1)
