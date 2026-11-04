@@ -111,3 +111,38 @@ def test_extraction_needs_no_reference_or_split(tmp_path, monkeypatch):
     assert "split" not in metadata["hit.wav"]
     assert not (out / "split_manifest.json").exists()
     assert (out / "features/hit.pt").is_file()
+
+
+def test_original_silence_keeps_zero_modes_and_continues(tmp_path):
+    import scripts.extract_baseline_modal as extraction
+
+    source = tmp_path / "source"
+    source.mkdir()
+    torchaudio.save(str(source / "silent.wav"), torch.zeros(1, 8193), 48000)
+    t = torch.arange(8193) / 48000
+    signal = (
+        0.4 * torch.sin(2 * torch.pi * 440 * t)
+        + 0.2 * torch.sin(2 * torch.pi * 880 * t)
+    )[None]
+    torchaudio.save(
+        str(source / "tone.wav"), signal, 48000, encoding="PCM_F", bits_per_sample=32
+    )
+    out = tmp_path / "cache"
+    extraction.extract(
+        source,
+        out,
+        analysis_method="original",
+        num_modes=4,
+        n_bins=48,
+        fmin=100,
+        bins_per_octave=12,
+        min_length=1,
+    )
+    silent = torch.load(out / "features/silent.pt", weights_only=True)
+    assert silent.shape == (3, 4, 8193 // 256 + 1)
+    assert torch.count_nonzero(silent) == 0
+    metadata = json.loads((out / "metadata.json").read_text())
+    assert metadata["silent.wav"]["num_active_tracks"] == 0
+    assert metadata["tone.wav"]["num_active_tracks"] > 0
+    stats = json.loads((out / "extraction_stats.json").read_text())
+    assert stats["zero_mode_files"] == ["silent.wav"]

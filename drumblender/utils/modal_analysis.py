@@ -290,6 +290,9 @@ class CQTModalAnalysis:
                 else:
                     break
 
+        if not freq_env:
+            return tuple(torch.zeros(0, num_hops) for _ in range(3))
+
         freq_env = torch.stack(freq_env)
         amp_env = torch.stack(amp_env)
         phase_env = torch.stack(phase_env)

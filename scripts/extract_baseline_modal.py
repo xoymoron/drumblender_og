@@ -311,6 +311,7 @@ def extract(
         "mean_seconds_per_file": total_seconds / len(stats),
         "total_tracks": sum(row["tracks"] for row in stats),
         "total_active_tracks": sum(row["active_tracks"] for row in stats),
+        "zero_mode_files": [row["path"] for row in stats if row["active_tracks"] == 0],
         "items": stats,
     }
     for name, content in [
