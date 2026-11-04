@@ -85,3 +85,29 @@ def test_original_extraction_matches_direct_upstream_analysis(tmp_path):
     got = torch.load(out / "features/hit.pt", weights_only=True)
     torch.testing.assert_close(got, expected, rtol=0, atol=0)
     torch.set_num_threads(previous_threads)
+
+
+def test_extraction_needs_no_reference_or_split(tmp_path, monkeypatch):
+    import scripts.extract_baseline_modal as extraction
+
+    class Original:
+        def __init__(self, **kwargs):
+            self.cqt = self
+
+        def to(self, device):
+            return self
+
+        def __call__(self, waveform):
+            return tuple(torch.ones(1, 1, 2) for _ in range(3))
+
+    monkeypatch.setattr(extraction, "CQTModalAnalysis", Original)
+    source = tmp_path / "source"
+    source.mkdir()
+    torchaudio.save(str(source / "hit.wav"), torch.ones(1, 480), 48000)
+    out = tmp_path / "cache"
+    extraction.extract(source, out, num_modes=2, analysis_method="original")
+    metadata = json.loads((out / "metadata.json").read_text())
+    assert metadata["hit.wav"]["num_samples"] == 480
+    assert "split" not in metadata["hit.wav"]
+    assert not (out / "split_manifest.json").exists()
+    assert (out / "features/hit.pt").is_file()

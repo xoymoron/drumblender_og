@@ -129,9 +129,10 @@ def _extract_file(path):
         "feature_file": feature.as_posix(),
         "num_samples": waveform.shape[-1],
         "sample_pack_key": pack_by_path.get(relative, "__root__"),
-        "split": manifest[relative],
         "audio_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
     }
+    if manifest is not None:
+        row["split"] = manifest[relative]
     return relative, row, item_stats
 
 
@@ -171,18 +172,24 @@ def extract(
     )
     if not wavs:
         raise ValueError("No preprocessed WAVs found")
-    if (split_manifest is None) == (reference_metadata is None):
-        raise ValueError(
-            "Provide exactly one reference metadata or frozen split manifest"
-        )
+    if split_manifest is not None and reference_metadata is not None:
+        raise ValueError("Provide at most one reference metadata or split manifest")
     manifest = (
         json.loads(Path(split_manifest).read_text(encoding="utf-8"))
         if split_manifest
-        else reference_splits(reference_metadata, seed, train_ratio, val_ratio)
+        else (
+            reference_splits(reference_metadata, seed, train_ratio, val_ratio)
+            if reference_metadata
+            else None
+        )
     )
-    if set(manifest) != {p.relative_to(root).as_posix() for p in wavs}:
+    if manifest is not None and set(manifest) != {
+        p.relative_to(root).as_posix() for p in wavs
+    }:
         raise ValueError("Split manifest membership must exactly match input WAVs")
-    if any(v not in ("train", "val", "test") for v in manifest.values()):
+    if manifest is not None and any(
+        v not in ("train", "val", "test") for v in manifest.values()
+    ):
         raise ValueError("Unknown split assignment")
     reference_rows = (
         json.loads(Path(reference_metadata).read_text(encoding="utf-8"))
@@ -310,9 +317,12 @@ def extract(
         ("extraction_stats.json", summary),
         ("metadata.json", metadata),
         ("modal_config.json", config),
-        ("split_manifest.json", manifest),
     ]:
         (out / name).write_text(json.dumps(content, indent=2), encoding="utf-8")
+    if manifest is not None:
+        (out / "split_manifest.json").write_text(
+            json.dumps(manifest, indent=2), encoding="utf-8"
+        )
     print(
         f"Extracted {len(metadata)} waveforms in {total_seconds:.1f}s; {summary['total_tracks']} tracks ({summary['total_active_tracks']} active) -> {out}"
     )
@@ -328,7 +338,7 @@ def main():
     parser.add_argument("--threads-per-worker", type=int, default=1)
     parser.add_argument("--processed-root", required=True)
     parser.add_argument("--out-dir", required=True)
-    splits = parser.add_mutually_exclusive_group(required=True)
+    splits = parser.add_mutually_exclusive_group()
     splits.add_argument("--split-manifest")
     splits.add_argument("--reference-metadata")
     parser.add_argument("--train-ratio", type=float, default=0.8)
