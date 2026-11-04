@@ -4,11 +4,13 @@ import argparse
 import hashlib
 import json
 import sys
+import time
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 import torchaudio
+from tqdm import tqdm
 
 # Direct script execution uses this checkout, even if another fork is installed.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -110,8 +112,11 @@ def extract(
         verbose=False,
     )
     metadata = {}
+    stats = []
     out.mkdir(parents=True)
-    for path in wavs:
+    started = time.perf_counter()
+    for path in tqdm(wavs, desc="Modal extraction", unit="file"):
+        item_started = time.perf_counter()
         waveform, rate = torchaudio.load(str(path))
         if (
             rate != sample_rate
@@ -135,6 +140,8 @@ def extract(
                     frequency, amplitude, phase = analyzer(waveform)
                 finally:
                     analyzer.cqt.pad_mode = previous
+        track_count = int(frequency.shape[1])
+        active_track_count = int(torch.count_nonzero(amplitude[0].abs().sum(dim=-1)))
         parameters = torch.stack(
             [frequency[0] * (2 * torch.pi / sample_rate), amplitude[0], phase[0]]
         )
@@ -142,7 +149,12 @@ def extract(
         feature = Path("features") / Path(relative).with_suffix(".pt")
         (out / feature).parent.mkdir(parents=True, exist_ok=True)
         torch.save(parameters, out / feature)
+        item_seconds = time.perf_counter() - item_started
+        stats.append({"path": relative, "seconds": item_seconds, "samples": int(waveform.shape[-1]), "tracks": track_count, "active_tracks": active_track_count})
         metadata[relative] = {
+            "num_tracks": track_count,
+            "num_active_tracks": active_track_count,
+            "extraction_seconds": item_seconds,
             "filename": str(path),
             "orig_relpath": relative,
             "feature_file": feature.as_posix(),
@@ -168,13 +180,16 @@ def extract(
         processed_root=str(root),
         waveform_processing="none",
     )
+    total_seconds = time.perf_counter() - started
+    summary = {"files": len(stats), "total_seconds": total_seconds, "mean_seconds_per_file": total_seconds / len(stats), "total_tracks": sum(row["tracks"] for row in stats), "total_active_tracks": sum(row["active_tracks"] for row in stats), "items": stats}
     for name, content in [
+        ("extraction_stats.json", summary),
         ("metadata.json", metadata),
         ("modal_config.json", config),
         ("split_manifest.json", manifest),
     ]:
         (out / name).write_text(json.dumps(content, indent=2), encoding="utf-8")
-    print(f"Extracted {len(metadata)} complete waveforms into {out}")
+    print(f"Extracted {len(metadata)} waveforms in {total_seconds:.1f}s; {summary['total_tracks']} tracks ({summary['total_active_tracks']} active) -> {out}")
 
 
 def main():
