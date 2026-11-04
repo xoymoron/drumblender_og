@@ -136,7 +136,7 @@ def test_bucketing_keeps_all_items_and_shuffles_each_epoch():
     assert first == list(sampler)
 
 
-def test_dataset_uses_frozen_splits_and_unmodified_waveforms(tmp_path):
+def test_dataset_uses_frozen_splits_and_unmodified_waveforms(tmp_path, monkeypatch):
     for index, n in enumerate([1001, 2001, 3001]):
         torchaudio.save(
             str(tmp_path / f"{index}.wav"),
@@ -163,6 +163,13 @@ def test_dataset_uses_frozen_splits_and_unmodified_waveforms(tmp_path):
         json.dumps({"sample_rate": 48000, "num_modes": 2})
     )
     ds = api().BaselineDataset(tmp_path, split="train", expected_num_modes=2)
+    original_load = torchaudio.load
+
+    def require_string_path(path, *args, **kwargs):
+        assert isinstance(path, str)
+        return original_load(path, *args, **kwargs)
+
+    monkeypatch.setattr(torchaudio, "load", require_string_path)
     x, p, key = ds[0]
     assert x.shape == (1, 1001) and key == "0"
     torch.testing.assert_close(x, torch.full_like(x, 0.25))
