@@ -112,7 +112,7 @@ def extract(
     metadata = {}
     out.mkdir(parents=True)
     for path in wavs:
-        waveform, rate = torchaudio.load(path)
+        waveform, rate = torchaudio.load(str(path))
         if (
             rate != sample_rate
             or waveform.shape[0] != 1
