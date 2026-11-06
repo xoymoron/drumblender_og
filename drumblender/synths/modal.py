@@ -51,19 +51,33 @@ def modal_synth(
     (batch_size, num_modes, num_frames) = freqs.shape
     assert freqs.shape == amps.shape
 
-    # Interpolate the frequencies and amplitudes
     w = torch.nn.functional.interpolate(freqs, size=num_samples, mode="linear")
-    a = torch.nn.functional.interpolate(amps, size=num_samples, mode="linear")
-
-    a = rearrange(a, "b m n -> (b m) n")
     w = rearrange(w, "b m n -> (b m) n")
+    carrier_dtype = w.dtype
     phase_env = torch.cumsum(w, dim=1, dtype=torch.float64)
+    del w
+
+    # Cached modal parameters need no phase gradients. Reuse the FP64 buffer.
+    reuse_phase = not phase_env.requires_grad and (
+        phase is None or not phase.requires_grad or not torch.is_grad_enabled()
+    )
     if phase is not None:
         phase = rearrange(phase, "b m n -> (b m) n")
-        phase_env = phase_env + phase[..., 0, None]
+        initial_phase = phase[..., 0, None]
+        if reuse_phase:
+            phase_env.add_(initial_phase)
+        else:
+            phase_env = phase_env + initial_phase
 
-    # Generate the modal signal
-    carrier = torch.sin(torch.remainder(phase_env, 2 * torch.pi)).to(w.dtype)
+    if reuse_phase:
+        phase_env.remainder_(2 * torch.pi).sin_()
+        carrier = phase_env.to(carrier_dtype)
+    else:
+        carrier = torch.sin(torch.remainder(phase_env, 2 * torch.pi)).to(carrier_dtype)
+    del phase_env
+
+    a = torch.nn.functional.interpolate(amps, size=num_samples, mode="linear")
+    a = rearrange(a, "b m n -> (b m) n")
     y = a * carrier
     y = rearrange(y, "(b m) n -> b m n", b=batch_size, m=num_modes)
 
