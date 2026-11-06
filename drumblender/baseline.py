@@ -62,6 +62,33 @@ class PerItemMRSTFTLoss(torch.nn.Module):
         return torch.stack(losses).mean()
 
 
+BRANCHES = ("modal", "noise", "transient")
+
+
+@torch.no_grad()
+def _tail_energy_totals(target, branches):
+    """Sum peak-normalized branch energies after the target's onset plus 100 ms."""
+    target = target[:, 0]
+    gain = target.abs().amax(dim=-1, keepdim=True).clamp_min(1e-4)
+    length = target.shape[-1]
+    window, hop = 128, 32
+    windows = max(1, (length - window + hop - 1) // hop + 1)
+    starts = torch.arange(windows, device=target.device) * hop
+    counts = (length - starts).clamp_max(window)
+    power = F.pad((target / gain).square(), (0, (windows - 1) * hop + window - length))
+    power = power.unfold(-1, window, hop).sum(-1) / counts
+    peak = power.amax(dim=-1, keepdim=True)
+    onset = (power > peak * 1e-4).int().argmax(dim=-1, keepdim=True) * hop
+    tail = (torch.arange(length, device=target.device) >= onset + 4800) & (peak > 0)
+    sums = [
+        (wave[:, 0] / gain).square().masked_fill_(~tail, 0).sum()
+        if wave is not None
+        else target.new_zeros(())
+        for wave in branches
+    ]
+    return torch.stack((*sums, tail.any(dim=-1).sum().to(target.dtype)))
+
+
 class VariableLengthDrumBlender(DrumBlender):
     """Use the original encoders, synths, weights and all-parallel signal routing.
 
@@ -78,12 +105,14 @@ class VariableLengthDrumBlender(DrumBlender):
             frame_lengths,
         )
 
-    def forward(self, original, params, lengths=None, frame_lengths=None):
+    def forward(
+        self, original, params, lengths=None, frame_lengths=None, *, tail_totals=None
+    ):
         if original.ndim != 3 or original.shape[1] != 1 or min(original.shape) < 1:
             raise ValueError("Expected nonempty mono audio [B,1,T]")
         if params.ndim != 4 or params.shape[0] != len(original):
             raise ValueError("Expected modal parameters [B,P,M,F]")
-        if lengths is None and frame_lengths is None:
+        if lengths is None and frame_lengths is None and tail_totals is None:
             return super().forward(original, params)
         batch, _, maximum = original.shape
         sizes = (
@@ -104,7 +133,11 @@ class VariableLengthDrumBlender(DrumBlender):
                 selection = slice(indices[0], indices[0] + 1)
             x = original[selection, :, :size]
             p = params[selection, ..., :frame_count]
-            y = super().forward(x, p)
+            if tail_totals is None:
+                y = super().forward(x, p)
+            else:
+                y, branches = super().forward(x, p, return_branches=True)
+                tail_totals.add_(_tail_energy_totals(x, branches))
             if y.shape != x.shape:
                 raise ValueError(
                     f"Synthesized shape {y.shape} differs from target {x.shape}"
@@ -115,9 +148,9 @@ class VariableLengthDrumBlender(DrumBlender):
                 results[index] = y[local : local + 1]
         return results[0] if batch == 1 else torch.cat(results)
 
-    def _do_step(self, batch):
+    def _do_step(self, batch, *, tail_totals=None):
         x, p, lengths, frames = batch
-        y = self(x, p, lengths, frames)
+        y = self(x, p, lengths, frames, tail_totals=tail_totals)
         return self.loss_fn(y, x, lengths=lengths), y
 
     def training_step(self, batch, batch_idx):
@@ -136,8 +169,11 @@ class VariableLengthDrumBlender(DrumBlender):
         )
         return loss
 
+    def on_validation_epoch_start(self):
+        self._validation_tail_totals = torch.zeros(4, device=self.device)
+
     def validation_step(self, batch, batch_idx):
-        loss, _ = self._do_step(batch)
+        loss, _ = self._do_step(batch, tail_totals=self._validation_tail_totals)
         self.log(
             "validation/loss",
             loss,
@@ -147,6 +183,20 @@ class VariableLengthDrumBlender(DrumBlender):
             sync_dist=True,
         )
         return loss
+
+    def on_validation_epoch_end(self):
+        # Reduce sums and eligible clip counts together, including ranks with no tails.
+        totals = self.all_gather(self._validation_tail_totals).reshape(-1, 4).sum(0)
+        if totals[-1] > 0:
+            self.log_dict(
+                {
+                    f"val_tail_{branch}_energy": value
+                    for branch, value in zip(BRANCHES, totals[:-1] / totals[-1])
+                },
+                on_step=False,
+                on_epoch=True,
+                batch_size=1,
+            )
 
     def test_step(self, batch, batch_idx):
         loss, _ = self._do_step(batch)

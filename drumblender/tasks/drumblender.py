@@ -89,6 +89,8 @@ class DrumBlender(pl.LightningModule):
         self,
         original: torch.Tensor,
         params: torch.Tensor,
+        *,
+        return_branches: bool = False,
     ):
         # Main embeddings
         embedding = None
@@ -118,7 +120,9 @@ class DrumBlender(pl.LightningModule):
                 transient_params, _ = self.transient_autoencoder(embedding)
 
         # Synthesis
-        y_hat = self.modal_synth(modal_params, original.shape[-1])
+        modal = self.modal_synth(modal_params, original.shape[-1])
+        y_hat = modal
+        noise = transient = None
 
         if self.noise_synth is not None:
             assert noise_params is not None, "Noise params must be provided"
@@ -142,6 +146,8 @@ class DrumBlender(pl.LightningModule):
             if self.transient_takes_noise is False:
                 y_hat = y_hat + noise
 
+        if return_branches:
+            return y_hat, (modal, noise, transient)
         return y_hat
 
     def _do_step(self, batch: Tuple[torch.Tensor, ...]):
