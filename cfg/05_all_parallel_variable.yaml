@@ -14,7 +14,8 @@ model:
     loss_fn:
       class_path: drumblender.baseline.PerItemMRSTFTLoss
     transient_parallel: true
-    float32_matmul_precision: medium
+    float32_matmul_precision: highest
+    cudnn_allow_tf32: false
 optimizer:
   class_path: torch.optim.Adam
   init_args:
@@ -37,11 +38,13 @@ data:
     num_workers: 12
     seed: 20261106
     use_bucketing: true
+    require_canonical_audio: true
 trainer:
   replace_sampler_ddp: false
   devices: 2
   strategy: ddp
   accelerator: gpu
+  precision: 32
   max_epochs: 150
   accumulate_grad_batches: 8
   callbacks:

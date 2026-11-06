@@ -17,6 +17,10 @@ from tqdm import tqdm
 # Direct script execution uses this checkout, even if another fork is installed.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from drumblender.baseline_analysis import BaselineModalAnalysis
+from drumblender.data.canonical_audio import (
+    load_canonical_waveform,
+    verify_canonical_waveform,
+)
 from drumblender.utils.modal_analysis import CQTModalAnalysis
 
 
@@ -82,7 +86,13 @@ def _extract_file(path):
     manifest, pack_by_path = _OPTIONS["manifest"], _OPTIONS["pack_by_path"]
     path = Path(path)
     item_started = time.perf_counter()
-    waveform, rate = torchaudio.load(str(path))
+    relative = path.relative_to(root).as_posix()
+    canonical = _OPTIONS["canonical_rows"].get(relative)
+    waveform, rate = (
+        load_canonical_waveform(path)
+        if canonical is not None
+        else torchaudio.load(str(path))
+    )
     if (
         rate != sample_rate
         or waveform.shape[0] != 1
@@ -90,7 +100,6 @@ def _extract_file(path):
         or not torch.isfinite(waveform).all()
     ):
         raise ValueError(f"Expected preprocessed finite mono {sample_rate} Hz: {path}")
-    relative = path.relative_to(root).as_posix()
     with torch.no_grad():
         try:
             frequency, amplitude, phase = analyzer(waveform.to(_DEVICE))
@@ -129,7 +138,11 @@ def _extract_file(path):
         "feature_file": feature.as_posix(),
         "num_samples": waveform.shape[-1],
         "sample_pack_key": pack_by_path.get(relative, "__root__"),
-        "audio_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "audio_sha256": (
+            canonical["audio_sha256"]
+            if canonical is not None
+            else hashlib.sha256(path.read_bytes()).hexdigest()
+        ),
     }
     if manifest is not None:
         row["split"] = manifest[relative]
@@ -157,6 +170,7 @@ def extract(
     devices=None,
     threads_per_worker=1,
     analysis_method="corrected",
+    canonical_audio_metadata=None,
 ):
     if analysis_method not in ("original", "corrected"):
         raise ValueError("Expected original or corrected analysis method")
@@ -172,8 +186,15 @@ def extract(
     )
     if not wavs:
         raise ValueError("No preprocessed WAVs found")
-    if split_manifest is not None and reference_metadata is not None:
-        raise ValueError("Provide at most one reference metadata or split manifest")
+    sources = (split_manifest, reference_metadata, canonical_audio_metadata)
+    if sum(source is not None for source in sources) > 1:
+        raise ValueError("Provide only one source of split membership")
+    canonical_rows = {}
+    if canonical_audio_metadata is not None:
+        rows = json.loads(Path(canonical_audio_metadata).read_text(encoding="utf-8"))
+        canonical_rows = {row["orig_relpath"]: row for row in rows.values()}
+        if not canonical_rows or len(rows) != len(canonical_rows):
+            raise ValueError("Canonical metadata must contain unique waveform paths")
     manifest = (
         json.loads(Path(split_manifest).read_text(encoding="utf-8"))
         if split_manifest
@@ -183,6 +204,8 @@ def extract(
             else None
         )
     )
+    if canonical_rows:
+        manifest = {name: row["split"] for name, row in canonical_rows.items()}
     if manifest is not None and set(manifest) != {
         p.relative_to(root).as_posix() for p in wavs
     }:
@@ -191,10 +214,16 @@ def extract(
         v not in ("train", "val", "test") for v in manifest.values()
     ):
         raise ValueError("Unknown split assignment")
+    # Check every reference before creating a cache or starting workers.
+    if canonical_rows:
+        for path in wavs:
+            verify_canonical_waveform(
+                path, canonical_rows[path.relative_to(root).as_posix()], sample_rate
+            )
     reference_rows = (
         json.loads(Path(reference_metadata).read_text(encoding="utf-8"))
         if reference_metadata
-        else {}
+        else canonical_rows
     )
     pack_by_path = {
         row["orig_relpath"].replace("\\", "/"): row.get("sample_pack_key") or "__root__"
@@ -226,6 +255,7 @@ def extract(
         sample_rate=sample_rate,
         num_modes=num_modes,
         manifest=manifest,
+        canonical_rows=canonical_rows,
         pack_by_path=pack_by_path,
         device=devices[0],
         analysis_method=analysis_method,
@@ -304,6 +334,8 @@ def extract(
             precision="float32; TF32 disabled on CUDA",
         ),
     )
+    if canonical_rows:
+        config["audio_backend"] = "sox"
     total_seconds = time.perf_counter() - started
     summary = {
         "files": len(stats),
@@ -342,6 +374,10 @@ def main():
     splits = parser.add_mutually_exclusive_group()
     splits.add_argument("--split-manifest")
     splits.add_argument("--reference-metadata")
+    splits.add_argument(
+        "--canonical-audio-metadata",
+        help="Frozen metadata containing orig_relpath, split, num_samples and audio_sha256",
+    )
     parser.add_argument("--train-ratio", type=float, default=0.8)
     parser.add_argument("--val-ratio", type=float, default=0.1)
     for name, default in [

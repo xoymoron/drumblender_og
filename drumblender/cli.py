@@ -4,7 +4,9 @@ drumblender command line interface entrypoint.
 import argparse
 import inspect
 import sys
+from pathlib import Path
 
+import soundfile as sf
 import torch
 import torchaudio
 import yaml
@@ -17,6 +19,7 @@ from tqdm import tqdm
 
 import drumblender.utils.data as data_utils
 import drumblender.utils.model as model_utils
+from drumblender.baseline import BaselineDataset, VariableLengthDrumBlender
 from drumblender.callbacks import SaveConfigCallbackWanb
 from drumblender.data import AudioDataModule
 from drumblender.utils.modal_analysis import CQTModalAnalysis
@@ -134,6 +137,40 @@ def verify_dataset(datamodule: LightningDataModule):
             _ = dataset[i]
 
 
+@torch.inference_mode()
+def _infer_cached_baseline(model, data_config, input_path, output_path):
+    dataset = BaselineDataset(
+        data_config["data_dir"],
+        sample_rate=data_config["sample_rate"],
+        expected_num_modes=data_config["expected_num_modes"],
+        audio_dir=data_config.get("audio_dir"),
+    )
+    if data_config.get("require_canonical_audio") and not dataset.canonical_audio:
+        raise ValueError("Extract the cache with --canonical-audio-metadata")
+    root = Path(dataset.audio_dir or dataset.config["processed_root"]).resolve()
+    path = Path(input_path).resolve()
+    if Path(output_path).resolve() == path:
+        raise ValueError("Output would overwrite the input waveform")
+    if not path.is_relative_to(root):
+        raise ValueError(f"Baseline inference expects a waveform from {root}")
+    key = path.relative_to(root).as_posix()
+    if (
+        key not in dataset.metadata
+        or dataset.audio_path(dataset.metadata[key]).resolve() != path
+    ):
+        raise ValueError(f"No cached modal features for {path}")
+    if dataset.canonical_audio:
+        dataset.verify_audio(key)
+    audio, params, _ = dataset[dataset.keys.index(key)]
+    model.eval()
+    prediction = model(
+        audio.unsqueeze(0).to(model.device), params.unsqueeze(0).to(model.device)
+    )
+    sf.write(
+        output_path, prediction.flatten().cpu().numpy(), dataset.sample_rate, subtype="FLOAT"
+    )
+
+
 def inference():
     """
     Given an input audio, compute reconstruction.
@@ -163,12 +200,16 @@ def inference():
     # Load the model from checkpoint
     model, _ = model_utils.load_model(args.config, args.checkpoint)
 
+    data_config = model_utils.load_config_yaml(args.config)["data"]["init_args"]
+    if isinstance(model, VariableLengthDrumBlender):
+        _infer_cached_baseline(model, data_config, args.input, args.output)
+        return
+
     # Load audio and convert to mono (just selecting the first channel)
     audio, input_sr = torchaudio.load(args.input)
     audio = audio[:1]
 
     # Resample to the sample rate used in training
-    data_config = model_utils.load_config_yaml(args.config)["data"]["init_args"]
     sample_rate = data_config["sample_rate"]
     if input_sr != sample_rate:
         audio = torchaudio.transforms.Resample(

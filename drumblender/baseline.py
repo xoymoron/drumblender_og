@@ -12,6 +12,10 @@ import torchaudio
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
 from drumblender.data.bucketing import BucketingBatchSampler
+from drumblender.data.canonical_audio import (
+    load_canonical_waveform,
+    verify_canonical_waveform,
+)
 from drumblender.tasks.drumblender import DrumBlender
 
 
@@ -199,12 +203,17 @@ class BaselineDataset(Dataset):
         audio_dir=None,
     ):
         self.data_dir = Path(data_dir)
-        self.config = json.loads((self.data_dir / "modal_config.json").read_text())
+        self.config = json.loads(
+            (self.data_dir / "modal_config.json").read_text(encoding="utf-8")
+        )
+        self.canonical_audio = self.config.get("audio_backend") == "sox"
         if self.config["sample_rate"] != sample_rate:
             raise ValueError("Cache sample rate differs from training sample rate")
         if self.config["num_modes"] != expected_num_modes:
             raise ValueError("Cache mode count differs from the selected baseline")
-        self.metadata = json.loads((self.data_dir / "metadata.json").read_text())
+        self.metadata = json.loads(
+            (self.data_dir / "metadata.json").read_text(encoding="utf-8")
+        )
         for row in self.metadata.values():
             if row.get("split") not in ("train", "val", "test"):
                 raise ValueError("Every item needs a frozen train/val/test split")
@@ -220,15 +229,24 @@ class BaselineDataset(Dataset):
     def __len__(self):
         return len(self.keys)
 
+    def audio_path(self, row):
+        if self.audio_dir is not None:
+            return self.audio_dir / row["orig_relpath"]
+        return self.data_dir / row["filename"]
+
+    def verify_audio(self, key):
+        row = self.metadata[key]
+        verify_canonical_waveform(self.audio_path(row), row, self.sample_rate)
+
     def __getitem__(self, index):
         key = self.keys[index]
         row = self.metadata[key]
-        path = (
-            self.audio_dir / row["orig_relpath"]
-            if self.audio_dir is not None
-            else self.data_dir / row["filename"]
+        path = self.audio_path(row)
+        x, sr = (
+            load_canonical_waveform(path)
+            if self.canonical_audio
+            else torchaudio.load(str(path))
         )
-        x, sr = torchaudio.load(str(path))
         if (
             sr != self.sample_rate
             or x.shape != (1, self.lengths[index])
@@ -266,17 +284,40 @@ class BaselineDataModule(pl.LightningDataModule):
         num_workers: int = 12,
         seed: int = 20261106,
         use_bucketing: bool = True,
+        require_canonical_audio: bool = False,
     ):
         super().__init__()
         self.data_dir, self.sample_rate = data_dir, sample_rate
         self.expected_num_modes, self.audio_dir = expected_num_modes, audio_dir
         self.batch_size, self.num_workers = batch_size, num_workers
         self.seed, self.use_bucketing = seed, use_bucketing
+        self.require_canonical_audio = require_canonical_audio
 
     def prepare_data(self):
         for name in ["metadata.json", "modal_config.json", "split_manifest.json"]:
             if not (Path(self.data_dir) / name).is_file():
                 raise FileNotFoundError(f"Extract modal features first: missing {name}")
+
+        dataset = BaselineDataset(
+            self.data_dir,
+            sample_rate=self.sample_rate,
+            expected_num_modes=self.expected_num_modes,
+            audio_dir=self.audio_dir,
+        )
+        if self.require_canonical_audio and not dataset.canonical_audio:
+            raise ValueError("Extract the cache with --canonical-audio-metadata")
+        if dataset.canonical_audio:
+            manifest = json.loads(
+                (dataset.data_dir / "split_manifest.json").read_text(encoding="utf-8")
+            )
+            expected = {
+                row["orig_relpath"]: row["split"] for row in dataset.metadata.values()
+            }
+            if manifest != expected:
+                raise ValueError("Canonical cache split differs from its frozen manifest")
+            # Lightning runs prepare_data once per node, outside the loader hot path.
+            for key in dataset.keys:
+                dataset.verify_audio(key)
 
     def setup(self, stage=None):
         splits = (

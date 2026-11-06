@@ -37,6 +37,7 @@ class DrumBlender(pl.LightningModule):
         encoder (Optional[nn.Module]): Receives audio and generates main embedding
         float32_matmul_precision(Literal["medium", "high", "highest", None]): Sets
             the precision of float32 matmul operations.
+        cudnn_allow_tf32 (Optional[bool]): Override the cuDNN TF32 setting.
     """
 
     def __init__(
@@ -56,6 +57,7 @@ class DrumBlender(pl.LightningModule):
         transient_autoencoder_accepts_audio: bool = False,
         test_metrics: Optional[torch.nn.ModuleDict] = None,
         float32_matmul_precision: Literal["medium", "high", "highest", None] = None,
+        cudnn_allow_tf32: Optional[bool] = None,
     ):
         super().__init__()
 
@@ -73,8 +75,12 @@ class DrumBlender(pl.LightningModule):
         self.transient_autoencoder_accepts_audio = transient_autoencoder_accepts_audio
         self.transient_takes_noise = transient_takes_noise
 
+        self.float32_matmul_precision = float32_matmul_precision
+        self.cudnn_allow_tf32 = cudnn_allow_tf32
         if float32_matmul_precision is not None:
             torch.set_float32_matmul_precision(float32_matmul_precision)
+        if cudnn_allow_tf32 is not None:
+            torch.backends.cudnn.allow_tf32 = cudnn_allow_tf32
 
         if test_metrics is not None:
             self.metrics = test_metrics

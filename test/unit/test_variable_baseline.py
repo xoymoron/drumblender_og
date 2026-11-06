@@ -399,7 +399,11 @@ def test_training_config_runs_with_standard_lightning_optimizer_and_accumulation
         json.dumps({k: v["split"] for k, v in metadata.items()})
     )
     config["data"]["init_args"].update(
-        data_dir=str(tmp_path), batch_size=2, num_workers=0, use_bucketing=False
+        data_dir=str(tmp_path),
+        batch_size=2,
+        num_workers=0,
+        use_bucketing=False,
+        require_canonical_audio=False,
     )
     config["trainer"].update(
         accelerator="cpu",
