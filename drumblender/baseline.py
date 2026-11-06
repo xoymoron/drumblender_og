@@ -51,11 +51,10 @@ class PerItemMRSTFTLoss(torch.nn.Module):
         for i, size in enumerate(sizes):
             x, y = pred[i : i + 1, :, :size], target[i : i + 1, :, :size]
             pad = max(0, minimum - size)
-            losses.append(
-                self.mrstft(
-                    F.pad(x, (0, pad)).contiguous(), F.pad(y, (0, pad)).contiguous()
-                )
-            )
+            if pad:
+                x = F.pad(x, (0, pad))
+                y = F.pad(y, (0, pad))
+            losses.append(self.mrstft(x.contiguous(), y.contiguous()))
         return torch.stack(losses).mean()
 
 
@@ -68,8 +67,12 @@ class VariableLengthDrumBlender(DrumBlender):
 
     def transfer_batch_to_device(self, batch, device, dataloader_idx):
         audio, params, lengths, frame_lengths = batch
-        return (audio.to(device, non_blocking=True),
-                params.to(device, non_blocking=True), lengths, frame_lengths)
+        return (
+            audio.to(device, non_blocking=True),
+            params.to(device, non_blocking=True),
+            lengths,
+            frame_lengths,
+        )
 
     def forward(self, original, params, lengths=None, frame_lengths=None):
         if original.ndim != 3 or original.shape[1] != 1 or min(original.shape) < 1:
@@ -92,16 +95,21 @@ class VariableLengthDrumBlender(DrumBlender):
             groups.setdefault(extent, []).append(index)
         results = [None] * batch
         for (size, frame_count), indices in groups.items():
-            x, p = original[indices, :, :size], params[indices, ..., :frame_count]
+            selection = indices
+            if len(indices) == 1:
+                selection = slice(indices[0], indices[0] + 1)
+            x = original[selection, :, :size]
+            p = params[selection, ..., :frame_count]
             y = super().forward(x, p)
             if y.shape != x.shape:
                 raise ValueError(
                     f"Synthesized shape {y.shape} differs from target {x.shape}"
                 )
-            y = F.pad(y, (0, maximum - size))
+            if size < maximum:
+                y = F.pad(y, (0, maximum - size))
             for local, index in enumerate(indices):
                 results[index] = y[local : local + 1]
-        return torch.cat(results)
+        return results[0] if batch == 1 else torch.cat(results)
 
     def _do_step(self, batch):
         x, p, lengths, frames = batch
@@ -110,12 +118,16 @@ class VariableLengthDrumBlender(DrumBlender):
 
     def training_step(self, batch, batch_idx):
         loss, _ = self._do_step(batch)
+        batch_size = len(batch[0])
         self.log(
-            "train/loss",
+            "train/loss_step", loss, on_step=True, on_epoch=False, batch_size=batch_size
+        )
+        self.log(
+            "train/loss_epoch",
             loss,
-            on_step=True,
+            on_step=False,
             on_epoch=True,
-            batch_size=len(batch[0]),
+            batch_size=batch_size,
             sync_dist=True,
         )
         return loss
@@ -159,8 +171,19 @@ def collate_baseline(items):
         for p in params
     ):
         raise ValueError("Modal parameter and mode axes must match")
-    x = torch.stack([F.pad(a, (0, max(sizes) - n)) for a, n in zip(audio, sizes)])
-    p = torch.stack([F.pad(v, (0, max(frames) - n)) for v, n in zip(params, frames)])
+    max_size, max_frames = max(sizes), max(frames)
+    x = torch.stack(
+        [
+            F.pad(a, (0, max_size - n)) if n < max_size else a
+            for a, n in zip(audio, sizes)
+        ]
+    )
+    p = torch.stack(
+        [
+            F.pad(v, (0, max_frames - n)) if n < max_frames else v
+            for v, n in zip(params, frames)
+        ]
+    )
     return x, p, torch.tensor(sizes), torch.tensor(frames)
 
 
@@ -225,7 +248,8 @@ class BaselineDataset(Dataset):
             or not torch.isfinite(p).all()
         ):
             raise ValueError(f"Invalid modal features: {key}")
-        p = F.pad(p, (0, 0, 0, self.expected_num_modes - p.shape[1]))
+        if p.shape[1] < self.expected_num_modes:
+            p = F.pad(p, (0, 0, 0, self.expected_num_modes - p.shape[1]))
         return x, p.float(), key
 
 
@@ -311,6 +335,7 @@ class BaselineDataModule(pl.LightningDataModule):
                 num_workers=self.num_workers,
                 collate_fn=collate_baseline,
                 pin_memory=True,
+                persistent_workers=training and self.num_workers > 0,
             )
         sampler = (
             DistributedSampler(
@@ -334,6 +359,7 @@ class BaselineDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             collate_fn=collate_baseline,
             pin_memory=True,
+            persistent_workers=training and self.num_workers > 0,
             drop_last=False,
         )
 
