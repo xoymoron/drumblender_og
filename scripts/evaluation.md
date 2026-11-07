@@ -72,3 +72,28 @@ For one-off inference with the variable-length recipe, use the training run's
 resolved config and a WAV from its cache. `drumblender-synth` loads the cached
 modal features and writes a float32 WAV. For a relocated WAV root, set
 `data.init_args.audio_dir` in the resolved config.
+
+
+## Full and sinusoidal-only paired exports
+
+Use the resolved training config and the matching cached modal parameters.
+The exporter writes the checkpoint reconstruction to `recon/` and the direct
+sum of analyzed modal oscillators to `sinusoidal/`. The latter uses the cached
+amplitudes and phases without learned modal corrections, noise or transient.
+Both waveforms use the valid clip length and float32 WAV encoding.
+
+```bash
+python -m scripts.export_reconstructions \
+  --config PATH_TO_RESOLVED_CONFIG \
+  --checkpoint PATH_TO_CHECKPOINT \
+  --data-dir PATH_TO_OG_CQT_CACHE \
+  --metrics-config PATH_TO_MAIN_REPO/cfg/metrics/drumblender_metrics.yaml \
+  --output PATH_TO_BUNDLE
+
+# Run from the main DrumBlender repository to use the shared evaluator.
+python -m scripts.compile_results PATH_TO_BUNDLE
+```
+
+The common evaluator adds a Sinusoidal row immediately below each model and
+writes its own per-clip and per-pack statistics. The table contains MSS, LSD,
+LSD low/mid/high, SF and MFCC, with mean and SD shown to two decimal places.
