@@ -89,6 +89,29 @@ def test_padding_does_not_change_eval_reconstruction_for_same_noise_draws():
             torch.testing.assert_close(y[i : i + 1, :, : x.shape[-1]], single)
 
 
+def test_branch_capture_preserves_grouped_prediction_and_valid_extents():
+    net = model()
+    batch = api().collate_baseline([item(1001, 5, "a"), item(4099, 17, "b")])
+    torch.manual_seed(7)
+    expected = net(*batch)
+    torch.manual_seed(7)
+    prediction, branches = net(*batch, return_branches=True)
+    torch.testing.assert_close(prediction, expected, rtol=0, atol=0)
+    assert prediction.requires_grad
+    for index, length in enumerate(batch[2]):
+        signals = branches[index]
+        assert set(signals) == {"modal", "noise", "transient"}
+        assert all(x.shape == (1, 1, length) for x in signals.values())
+        assert all(not x.requires_grad for x in signals.values())
+        reconstructed = (signals["modal"] + signals["transient"]) + signals["noise"]
+        torch.testing.assert_close(
+            prediction[index : index + 1, :, :length],
+            reconstructed,
+            rtol=0,
+            atol=0,
+        )
+
+
 def test_full_length_training_has_finite_gradients():
     net = model().train()
     batch = api().collate_baseline([item(1001, 5, "a"), item(4099, 17, "b")])

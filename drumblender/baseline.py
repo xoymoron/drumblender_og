@@ -74,12 +74,15 @@ class VariableLengthDrumBlender(DrumBlender):
             frame_lengths,
         )
 
-    def forward(self, original, params, lengths=None, frame_lengths=None):
+    def forward(
+        self, original, params, lengths=None, frame_lengths=None, *, return_branches=False
+    ):
+        """Optionally return detached, unpadded branch signals for each clip."""
         if original.ndim != 3 or original.shape[1] != 1 or min(original.shape) < 1:
             raise ValueError("Expected nonempty mono audio [B,1,T]")
         if params.ndim != 4 or params.shape[0] != len(original):
             raise ValueError("Expected modal parameters [B,P,M,F]")
-        if lengths is None and frame_lengths is None:
+        if lengths is None and frame_lengths is None and not return_branches:
             return super().forward(original, params)
         batch, _, maximum = original.shape
         sizes = (
@@ -94,13 +97,23 @@ class VariableLengthDrumBlender(DrumBlender):
         for index, extent in enumerate(zip(sizes, frames)):
             groups.setdefault(extent, []).append(index)
         results = [None] * batch
+        if return_branches:
+            branches = [None] * batch
         for (size, frame_count), indices in groups.items():
             selection = indices
             if len(indices) == 1:
                 selection = slice(indices[0], indices[0] + 1)
             x = original[selection, :, :size]
             p = params[selection, ..., :frame_count]
-            y = super().forward(x, p)
+            if return_branches:
+                y, group_branches = super().forward(x, p, return_branches=True)
+                for local, index in enumerate(indices):
+                    branches[index] = {
+                        name: signal[local : local + 1]
+                        for name, signal in group_branches.items()
+                    }
+            else:
+                y = super().forward(x, p)
             if y.shape != x.shape:
                 raise ValueError(
                     f"Synthesized shape {y.shape} differs from target {x.shape}"
@@ -109,7 +122,8 @@ class VariableLengthDrumBlender(DrumBlender):
                 y = F.pad(y, (0, maximum - size))
             for local, index in enumerate(indices):
                 results[index] = y[local : local + 1]
-        return results[0] if batch == 1 else torch.cat(results)
+        prediction = results[0] if batch == 1 else torch.cat(results)
+        return (prediction, branches) if return_branches else prediction
 
     def _do_step(self, batch):
         x, p, lengths, frames = batch
