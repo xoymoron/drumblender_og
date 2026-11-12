@@ -196,4 +196,7 @@ def inference():
     # Run the model!
     y_hat = model(audio.unsqueeze(0), modal_tensor)
 
-    torchaudio.save(args.output, y_hat.squeeze(0), sample_rate)
+    torchaudio.save(
+        args.output, y_hat.squeeze(0).cpu(), sample_rate,
+        format="wav", encoding="PCM_F", bits_per_sample=32, backend="soundfile",
+    )

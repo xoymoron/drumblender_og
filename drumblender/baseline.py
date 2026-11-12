@@ -228,7 +228,7 @@ class BaselineDataset(Dataset):
             if self.audio_dir is not None
             else self.data_dir / row["filename"]
         )
-        x, sr = torchaudio.load(str(path))
+        x, sr = torchaudio.load(str(path), backend="soundfile")
         if (
             sr != self.sample_rate
             or x.shape != (1, self.lengths[index])

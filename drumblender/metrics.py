@@ -133,8 +133,8 @@ class SpectralFluxOnsetError(Metric):
             normalized=False,
             onesided=True,
         )
-        # L2-norm on the rectified difference of the magnitude spectrogram
-        flux = torch.diff(torch.abs(X), dim=1)
+        # STFT is [batch, frequency, time]; onset flux differentiates time.
+        flux = torch.diff(torch.abs(X), dim=-1)
         flux = (flux + torch.abs(flux)) / 2
         flux = torch.square(flux)
         flux = torch.sum(flux, dim=1)

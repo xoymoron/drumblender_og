@@ -82,7 +82,7 @@ def _extract_file(path):
     manifest, pack_by_path = _OPTIONS["manifest"], _OPTIONS["pack_by_path"]
     path = Path(path)
     item_started = time.perf_counter()
-    waveform, rate = torchaudio.load(str(path))
+    waveform, rate = torchaudio.load(str(path), backend="soundfile")
     if (
         rate != sample_rate
         or waveform.shape[0] != 1

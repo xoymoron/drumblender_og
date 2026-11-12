@@ -32,7 +32,7 @@ def preprocess_audio_file(
             padded with zeros to the desired length.
         mono: Whether to convert the audio to mono. Defaults to True.
     """
-    waveform, orig_freq = torchaudio.load(input_file)
+    waveform, orig_freq = torchaudio.load(str(input_file), backend="soundfile")
     assert waveform.ndim == 2, "Expecting a 2D tensor, channels x samples"
 
     # Convert to mono if necessary
@@ -62,7 +62,10 @@ def preprocess_audio_file(
             num_pad = num_samples - waveform.shape[1]
             waveform = torch.nn.functional.pad(waveform, (0, num_pad))
 
-    torchaudio.save(output_file, waveform, sample_rate)
+    torchaudio.save(
+        str(output_file), waveform.cpu(), sample_rate,
+        format="wav", encoding="PCM_F", bits_per_sample=32, backend="soundfile",
+    )
 
 
 def generate_sine_wave(
